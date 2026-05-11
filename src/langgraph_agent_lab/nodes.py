@@ -6,7 +6,37 @@ input state in place.
 
 from __future__ import annotations
 
+import re
+
 from .state import AgentState, ApprovalDecision, Route, make_event
+
+
+_PHONE_PATTERN = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
+_EMAIL_PATTERN = re.compile(r"(?<!\w)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?!\w)")
+_ORDER_ID_PATTERN = re.compile(r"(?i)\b(?:order\s*(?:id)?|ticket\s*(?:id)?|case\s*(?:id)?)\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9-]{2,})")
+
+
+def _redact_sensitive_text(value: str) -> tuple[str, dict[str, str]]:
+    """Replace common sensitive tokens with stable placeholders."""
+    metadata: dict[str, str] = {}
+
+    def replace_phone(match: re.Match[str]) -> str:
+        metadata.setdefault("phone_number", match.group(0))
+        return "PHONE_NUMBER"
+
+    def replace_email(match: re.Match[str]) -> str:
+        metadata.setdefault("email_address", match.group(0))
+        return "EMAIL_ADDRESS"
+
+    def replace_order_id(match: re.Match[str]) -> str:
+        metadata.setdefault("order_id", match.group(1))
+        prefix = match.group(0)[: match.group(0).lower().find(match.group(1).lower())]
+        return f"{prefix}ORDER_ID"
+
+    redacted = _PHONE_PATTERN.sub(replace_phone, value)
+    redacted = _EMAIL_PATTERN.sub(replace_email, redacted)
+    redacted = _ORDER_ID_PATTERN.sub(replace_order_id, redacted)
+    return redacted, metadata
 
 
 def intake_node(state: AgentState) -> dict:
@@ -14,11 +44,21 @@ def intake_node(state: AgentState) -> dict:
 
     TODO(student): add normalization, PII checks, and metadata extraction.
     """
-    query = state.get("query", "").strip()
+    raw_query = state.get("query", "")
+    query = " ".join(raw_query.strip().split())
+    redacted_query, pii_metadata = _redact_sensitive_text(query)
+    metadata_bits = []
+    if pii_metadata:
+        metadata_bits.append(f"pii={','.join(sorted(pii_metadata))}")
+    if redacted_query != query:
+        metadata_bits.append("redacted")
+    event_message = "query normalized"
+    if metadata_bits:
+        event_message = f"{event_message}; {'; '.join(metadata_bits)}"
     return {
-        "query": query,
-        "messages": [f"intake:{query[:40]}"],
-        "events": [make_event("intake", "completed", "query normalized")],
+        "query": redacted_query,
+        "messages": [f"intake:{redacted_query[:40]}"],
+        "events": [make_event("intake", "completed", event_message, original_length=len(query), **pii_metadata)],
     }
 
 
@@ -33,14 +73,14 @@ def classify_node(state: AgentState) -> dict:
     clean_words = [w.strip("?!.,;:") for w in words]
     route = Route.SIMPLE
     risk_level = "low"
-    if "refund" in query or "delete" in query or "send" in query:
+    if any(token in query for token in ("refund", "delete", "send", "cancel", "transfer")):
         route = Route.RISKY
         risk_level = "high"
-    elif "status" in query or "order" in query or "lookup" in query:
+    elif any(token in query for token in ("status", "order", "lookup", "track", "where is", "find")):
         route = Route.TOOL
-    elif len(clean_words) < 5 and "it" in clean_words:
+    elif len(clean_words) < 5 and any(token in clean_words for token in ("it", "this", "that", "they")):
         route = Route.MISSING_INFO
-    elif "timeout" in query or "fail" in query:
+    elif any(token in query for token in ("timeout", "fail", "error", "exception")):
         route = Route.ERROR
     return {
         "route": route.value,
@@ -54,7 +94,11 @@ def ask_clarification_node(state: AgentState) -> dict:
 
     TODO(student): generate a specific clarification question from state.
     """
-    question = "Can you provide the order id or the missing context?"
+    query = state.get("query", "")
+    if "order" in query.lower():
+        question = "Can you provide the order ID so I can look it up?"
+    else:
+        question = "Can you share the missing details so I can continue?"
     return {
         "pending_question": question,
         "final_answer": question,
@@ -72,7 +116,11 @@ def tool_node(state: AgentState) -> dict:
     if state.get("route") == Route.ERROR.value and attempt < 2:
         result = f"ERROR: transient failure attempt={attempt} scenario={state.get('scenario_id', 'unknown')}"
     else:
-        result = f"mock-tool-result for scenario={state.get('scenario_id', 'unknown')}"
+        query = state.get("query", "")
+        if "order" in query.lower():
+            result = f"Order lookup completed for scenario={state.get('scenario_id', 'unknown')}"
+        else:
+            result = f"mock-tool-result for scenario={state.get('scenario_id', 'unknown')}"
     return {
         "tool_results": [result],
         "events": [make_event("tool", "completed", f"tool executed attempt={attempt}")],
@@ -84,9 +132,15 @@ def risky_action_node(state: AgentState) -> dict:
 
     TODO(student): create a proposed action with evidence and risk justification.
     """
+    query = state.get("query", "")
+    reason = "high-risk action requested"
+    if "refund" in query.lower():
+        reason = "refund request may affect customer balance"
+    elif any(token in query.lower() for token in ("delete", "send", "transfer", "cancel")):
+        reason = "external or destructive action requested"
     return {
-        "proposed_action": "prepare refund or external action; approval required",
-        "events": [make_event("risky_action", "pending_approval", "approval required")],
+        "proposed_action": f"{reason}; approval required",
+        "events": [make_event("risky_action", "pending_approval", reason)],
     }
 
 
@@ -125,9 +179,12 @@ def retry_or_fallback_node(state: AgentState) -> dict:
     TODO(student): implement bounded retry, exponential backoff metadata, and fallback route.
     """
     attempt = int(state.get("attempt", 0)) + 1
-    errors = [f"transient failure attempt={attempt}"]
+    previous_errors = list(state.get("errors", []))
+    errors = previous_errors + [f"transient failure attempt={attempt}"]
+    route = Route.DEAD_LETTER.value if attempt >= int(state.get("max_attempts", 3)) else Route.TOOL.value
     return {
         "attempt": attempt,
+        "route": route,
         "errors": errors,
         "events": [make_event("retry", "completed", "retry attempt recorded", attempt=attempt)],
     }
@@ -138,7 +195,10 @@ def answer_node(state: AgentState) -> dict:
 
     TODO(student): ground the answer in tool_results and approval where relevant.
     """
-    if state.get("tool_results"):
+    approval = state.get("approval") or {}
+    if state.get("route") == Route.RISKY.value and not approval.get("approved"):
+        answer = "I could not proceed because the action was not approved."
+    elif state.get("tool_results"):
         answer = f"I found: {state['tool_results'][-1]}"
     else:
         answer = "This is a safe mock answer. Replace with your agent response."
@@ -159,6 +219,11 @@ def evaluate_node(state: AgentState) -> dict:
         return {
             "evaluation_result": "needs_retry",
             "events": [make_event("evaluate", "completed", "tool result indicates failure, retry needed")],
+        }
+    if not latest:
+        return {
+            "evaluation_result": "needs_retry",
+            "events": [make_event("evaluate", "completed", "missing tool result, retry needed")],
         }
     return {
         "evaluation_result": "success",
