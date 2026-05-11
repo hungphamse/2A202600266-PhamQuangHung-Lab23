@@ -10,10 +10,11 @@ import re
 
 from .state import AgentState, ApprovalDecision, Route, make_event
 
-
 _PHONE_PATTERN = re.compile(r"(?<!\w)(?:\+?\d[\d\s().-]{7,}\d)(?!\w)")
 _EMAIL_PATTERN = re.compile(r"(?<!\w)[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?!\w)")
-_ORDER_ID_PATTERN = re.compile(r"(?i)\b(?:order\s*(?:id)?|ticket\s*(?:id)?|case\s*(?:id)?)\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9-]{2,})")
+_ORDER_ID_PATTERN = re.compile(
+    r"(?i)\b(?:order\s*(?:id)?|ticket\s*(?:id)?|case\s*(?:id)?)\s*[:#-]?\s*([A-Za-z0-9][A-Za-z0-9-]{2,})"
+)
 
 
 def _redact_sensitive_text(value: str) -> tuple[str, dict[str, str]]:
@@ -58,7 +59,11 @@ def intake_node(state: AgentState) -> dict:
     return {
         "query": redacted_query,
         "messages": [f"intake:{redacted_query[:40]}"],
-        "events": [make_event("intake", "completed", event_message, original_length=len(query), **pii_metadata)],
+        "events": [
+            make_event(
+                "intake", "completed", event_message, original_length=len(query), **pii_metadata
+            )
+        ],
     }
 
 
@@ -76,9 +81,13 @@ def classify_node(state: AgentState) -> dict:
     if any(token in query for token in ("refund", "delete", "send", "cancel", "transfer")):
         route = Route.RISKY
         risk_level = "high"
-    elif any(token in query for token in ("status", "order", "lookup", "track", "where is", "find")):
+    elif any(
+        token in query for token in ("status", "order", "lookup", "track", "where is", "find")
+    ):
         route = Route.TOOL
-    elif len(clean_words) < 5 and any(token in clean_words for token in ("it", "this", "that", "they")):
+    elif len(clean_words) < 5 and any(
+        token in clean_words for token in ("it", "this", "that", "they")
+    ):
         route = Route.MISSING_INFO
     elif any(token in query for token in ("timeout", "fail", "error", "exception")):
         route = Route.ERROR
@@ -157,10 +166,12 @@ def approval_node(state: AgentState) -> dict:
     if os.getenv("LANGGRAPH_INTERRUPT", "").lower() == "true":
         from langgraph.types import interrupt
 
-        value = interrupt({
-            "proposed_action": state.get("proposed_action"),
-            "risk_level": state.get("risk_level"),
-        })
+        value = interrupt(
+            {
+                "proposed_action": state.get("proposed_action"),
+                "risk_level": state.get("risk_level"),
+            }
+        )
         if isinstance(value, dict):
             decision = ApprovalDecision(**value)
         else:
@@ -181,7 +192,11 @@ def retry_or_fallback_node(state: AgentState) -> dict:
     attempt = int(state.get("attempt", 0)) + 1
     previous_errors = list(state.get("errors", []))
     errors = previous_errors + [f"transient failure attempt={attempt}"]
-    route = Route.DEAD_LETTER.value if attempt >= int(state.get("max_attempts", 3)) else Route.TOOL.value
+    route = (
+        Route.DEAD_LETTER.value
+        if attempt >= int(state.get("max_attempts", 3))
+        else Route.TOOL.value
+    )
     return {
         "attempt": attempt,
         "route": route,
@@ -218,7 +233,9 @@ def evaluate_node(state: AgentState) -> dict:
     if "ERROR" in latest:
         return {
             "evaluation_result": "needs_retry",
-            "events": [make_event("evaluate", "completed", "tool result indicates failure, retry needed")],
+            "events": [
+                make_event("evaluate", "completed", "tool result indicates failure, retry needed")
+            ],
         }
     if not latest:
         return {
@@ -239,7 +256,13 @@ def dead_letter_node(state: AgentState) -> dict:
     """
     return {
         "final_answer": "Request could not be completed after maximum retry attempts. Logged for manual review.",
-        "events": [make_event("dead_letter", "completed", f"max retries exceeded, attempt={state.get('attempt', 0)}")],
+        "events": [
+            make_event(
+                "dead_letter",
+                "completed",
+                f"max retries exceeded, attempt={state.get('attempt', 0)}",
+            )
+        ],
     }
 
 

@@ -2,7 +2,10 @@ import importlib.util
 
 import pytest
 
-pytestmark = pytest.mark.skipif(importlib.util.find_spec("langgraph") is None, reason="langgraph not installed in local environment")
+pytestmark = pytest.mark.skipif(
+    importlib.util.find_spec("langgraph") is None,
+    reason="langgraph not installed in local environment",
+)
 
 from langgraph_agent_lab.graph import build_graph
 from langgraph_agent_lab.persistence import build_checkpointer

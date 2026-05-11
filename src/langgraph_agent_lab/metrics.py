@@ -34,7 +34,9 @@ class MetricsReport(BaseModel):
     scenario_metrics: list[ScenarioMetric]
 
 
-def metric_from_state(state: dict[str, Any], expected_route: str, approval_required: bool) -> ScenarioMetric:
+def metric_from_state(
+    state: dict[str, Any], expected_route: str, approval_required: bool
+) -> ScenarioMetric:
     events = state.get("events", []) or []
     errors = state.get("errors", []) or []
     actual_route = state.get("route")
@@ -42,7 +44,9 @@ def metric_from_state(state: dict[str, Any], expected_route: str, approval_requi
     nodes = [event.get("node", "unknown") for event in events]
     retry_count = sum(1 for node in nodes if node == "retry")
     interrupt_count = sum(1 for node in nodes if node == "approval")
-    success = actual_route == expected_route and bool(state.get("final_answer") or state.get("pending_question"))
+    success = actual_route == expected_route and bool(
+        state.get("final_answer") or state.get("pending_question")
+    )
     if approval_required:
         success = success and approval is not None
     return ScenarioMetric(

@@ -1,4 +1,9 @@
-from langgraph_agent_lab.routing import route_after_approval, route_after_classify, route_after_evaluate, route_after_retry
+from langgraph_agent_lab.routing import (
+    route_after_approval,
+    route_after_classify,
+    route_after_evaluate,
+    route_after_retry,
+)
 from langgraph_agent_lab.state import Route
 
 
